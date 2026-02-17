@@ -6,7 +6,7 @@
 |--------|-------|
 | Description | Processed commercial fisheries exchange value (EV) data for the Main Hawaiian Islands (MHI) |
 | Reporting unit | DAR catch areas (82 areas) |
-| Temporal coverage | 1997--2021 |
+| Temporal coverage | 1997—2021 |
 | Source data | HDAR Commercial Marine Landings |
 | Ecosystem attribution | Fish Species over Ecosystem Type (FSOET) dataset |
 | EV definition | Gross Revenue - Marginal Costs, per the UN SEEA-EA framework |
@@ -25,7 +25,7 @@
 
 **Species groups:** Deep 7 Bottomfish, Shallow Bottomfish, Pelagics, Reef-Associated, All Species
 
-**Ecosystem types:** Inshore -- Reef, Coastal -- Open Ocean, All Ecosystems
+**Ecosystem types:** Inshore — Reef, Coastal — Open Ocean, All Ecosystems
 
 ## Data dictionary
 
