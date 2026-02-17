@@ -7,3 +7,5 @@ data/03_processed/**/*.geojson
 
 # Archive folders
 _archive/
+
+scripts/
