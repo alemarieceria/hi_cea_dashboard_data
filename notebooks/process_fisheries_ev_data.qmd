@@ -1,0 +1,641 @@
+---
+title: "Process Fisheries Exchange Value Data"
+author: "Alemarie Ceria"
+date: "02/16/2026"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This notebook processes commercial and non-commercial fisheries exchange value (EV) data for the Main Hawaiian Islands (MHI).
+
+**Input:** An Excel workbook prepared by Ela Ural with two sheets:
+
+| Sheet | Data source | Coverage |
+|-------|-------------|----------|
+| Comm | HDAR Commercial Marine Landings | 1997--2021 |
+| Non-comm | MRIP Hawai'i Marine Recreational Fishing Survey | 2005--2022 |
+
+**Processing steps:** Transform each sheet from wide to long format, standardize column names and values, join reporting-unit geometries for mapping, and export analysis-ready files.
+
+**Output purpose:** These outputs are intended to be used as inputs to build an interactive dashboard with choropleth maps, tables, and line plots.
+
+### Key details
+
+**Exchange value definition:** Gross revenue minus marginal costs (EV = Gross Revenue - Marginal Costs), following the UN SEEA-EA framework.
+
+**Commercial EVs:**
+
+- Reporting unit: DAR catch areas (82 areas)
+- Species groups: Deep 7 Bottomfish, Shallow Bottomfish, Pelagics, Reef-Associated, All Species
+- Ecosystem type attribution uses a Fish Species over Ecosystem Type (FSOET) dataset, which assigns probabilities of each species group being extracted from each habitat class.
+- The full HIMARC benthic habitat classes were reclassified to a simplified reef (Inshore -- Reef) vs. open ocean (Coastal -- Open Ocean) split for this iteration.
+- Future iterations may incorporate the full SEEA-EA ecosystem types (soft bottom, rock/boulder, pavement, coral-dominated hard bottom, other hard bottom, open ocean).
+
+**Non-commercial EVs:**
+
+- Reporting unit: Islands (6 islands)
+- Species groups: Herbivores only (current iteration)
+- Ecosystem type attribution follows the same FSOET approach, though all herbivore species map to 100% reef habitat in this iteration.
+
+**Geometry note:** Geometry represents reporting units (DAR catch areas or islands). Exchange values are attributed to these units and are not spatially allocated to benthic habitat raster cells.
+
+## Reproducibility
+
+To replicate these results, you need the following input files in the specified directory structure relative to the project root:
+
+```
+project_root/
+├── data/
+│   ├── 01_raw/
+│   │   └── fisheries/
+│   │       ├── noncomm_and_comm_fsoet_hi.xlsx
+│   │       └── dar_fish_catch_areas/
+│   │           └── dar_fish_catch_areas_2008.shp (+ .dbf, .shx, .prj)
+│   └── 02_interim/
+│       └── mokus_combined.gpkg
+└── notebooks/
+    └── process_fisheries_ev_data.qmd
+```
+
+Outputs are exported to:
+
+```
+project_root/
+└── data/
+    └── 03_processed/
+        └── fisheries/
+            └── {YYYYMMDD}/
+                ├── comm_ev/
+                │   ├── {YYYYMMDD}_tidied_comm_ev.csv
+                │   ├── {YYYYMMDD}_tidied_comm_ev.gpkg
+                │   └── {YYYYMMDD}_tidied_comm_ev.geojson
+                └── noncomm_ev/
+                    ├── {YYYYMMDD}_tidied_noncomm_ev.csv
+                    ├── {YYYYMMDD}_tidied_noncomm_ev.gpkg
+                    └── {YYYYMMDD}_tidied_noncomm_ev.geojson
+```
+
+**Before running this notebook:**
+
+- **Dependencies:** This project uses `renv`. Run `renv::restore()` in the R console to install all required packages at the correct versions. See the repository README for full setup instructions.
+- **Path management:** This notebook uses the `here` package. Ensure the project root contains an `.Rproj` file or `.here` sentinel file so `here()` resolves correctly.
+
+## Setup
+
+### Imports
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(here)
+library(janitor)
+library(rmapshaper)
+library(glue)
+library(sf)
+library(stringr)
+library(scales)
+library(fs)
+library(mapview)
+```
+
+### Paths
+
+```{r}
+# Commercial and non-commercial exchange values dataset file path
+ev_fp <- "data/01_raw/fisheries/noncomm_and_comm_fsoet_hi.xlsx"
+
+# Catch areas layer file path
+fish_catch_areas_fp <- "data/01_raw/fisheries/dar_fish_catch_areas/dar_fish_catch_areas_2008.shp"
+
+# Mokus layer file path
+mokus_fp <- "data/02_interim/mokus_combined.gpkg"
+```
+
+## Commercial Exchange Values
+
+### Process tabular data
+
+```{r}
+# Process commercial exchange values data
+comm_ev_df <- read_excel(
+  here(ev_fp),
+  sheet = "Comm"
+) |>
+  # Standardize variable names
+  clean_names() |>
+  # Rename column
+  rename("area_id" = area) |>
+  # Remove unwanted columns
+  select(-c("x19", "x20")) |>
+  mutate(
+    # Change data type
+    across(c(year, area_id), as.integer),
+    # Standardize county values to match other datasets for easy join
+    county = str_to_title(county)
+  ) |>
+  # Doesn't exist in catch areas polygon & comm ev data is all $0
+  filter(area_id != 507) |>
+  # Transform to long format
+  pivot_longer(
+    cols = -c(1:3),
+    names_to = "species_group.ecosystem_type",
+    values_to = "exchange_value"
+  ) |>
+  # Remove unnecessary partial string
+  mutate(
+    species_group.ecosystem_type = str_remove(
+      species_group.ecosystem_type,
+      "^(ev_|eg_)"
+    )
+  ) |>
+  # Separate column into 2
+  separate(
+    col = species_group.ecosystem_type,
+    into = c("species_group", "ecosystem_type"),
+    sep = "_",
+    remove = TRUE
+  ) |>
+  mutate(
+    # Standardize values
+    species_group = case_when(
+      species_group == "deep7" ~ "Deep 7 Bottomfish",
+      species_group == "sbf" ~ "Shallow Bottomfish",
+      species_group == "reef" ~ "Reef-Associated",
+      species_group == "pelagic" ~ "Pelagics",
+      species_group == "total" ~ "All Species",
+      TRUE ~ NA_character_
+    ),
+    ecosystem_type = case_when(
+      ecosystem_type == "reef" ~ "Inshore — Reef",
+      ecosystem_type == "oo" ~ "Coastal — Open Ocean",
+      TRUE ~ "All Ecosystems"
+    ),
+    # Correct Honolulu county value
+    county = if_else(county == "Oahu", "Honolulu", county),
+    # For display
+    county_olelo = case_when(
+      county == "Kauai" ~ "Kaua\u02BBi",
+      county == "Hawaii" ~ "Hawai\u02BBi",
+      TRUE ~ county
+    ),
+    # For display
+    exchange_value_formatted = scales::label_dollar(
+      accuracy = 1,
+      prefix = "$"
+    )(exchange_value)
+  ) |>
+  # Relocate columns
+  select(
+    year,
+    area_id,
+    county,
+    county_olelo,
+    species_group,
+    ecosystem_type,
+    exchange_value,
+    exchange_value_formatted
+  )
+  
+stopifnot(!any(grepl("[‘’]", comm_ev_df$county_olelo)))
+```
+
+### Process spatial data and create sf
+
+```{r}
+# Get unique area IDs for join to catch areas polygon
+unique_area_ids <- unique(comm_ev_df$area_id)
+
+# Process catch areas polygon
+fish_catch_areas <- st_read(here(fish_catch_areas_fp)) |>
+  # Reproject to EPSG: 4326 for web mapping
+  st_transform("EPSG:4326") |>
+  # Standardize variable names
+  clean_names() |>
+  # Subset
+  select(area_id, geometry) |>
+  # Filter catch areas to those with exchange values
+  filter(area_id %in% unique_area_ids)
+
+# Create sf for choropleth map
+comm_ev_sf <- comm_ev_df |>
+  # Join catch area layer to commercial ev data
+  left_join(fish_catch_areas, by = "area_id") |>
+  # Convert to an sf object
+  st_as_sf()
+
+# QA check
+stopifnot(!any(grepl("[‘’]", comm_ev_sf$county_olelo)))
+stopifnot(sum(is.na(sf::st_dimension(comm_ev_sf$geometry))) == 0)
+```
+
+### Preview
+
+```{r}
+# Example df for choropleth map
+map_df <- comm_ev_sf |>
+  filter(
+    year == 2021,
+    county == "Maui",
+    ecosystem_type == "Inshore — Reef",
+    species_group == "All Species"
+  )
+
+# Example choropleth map
+stopifnot(nrow(map_df) > 0)
+mapview(map_df, zcol = "exchange_value")
+```
+
+## Non-Commercial Exchange Values
+
+### Process tabular data
+
+```{r}
+noncomm_ev_df <- read_excel(
+  here(ev_fp),
+  sheet = "Non-comm"
+) |>
+  # Standardize variable names
+  clean_names() |>
+  mutate(
+    # Convert data type to integer
+    year = as.integer(year),
+    # Standardize island values
+    island = str_to_title(island),
+    # For display
+    island_olelo = case_when(
+      island == "Kauai" ~ "Kaua\u02BBi",
+      island == "Niihau" ~ "Ni\u02BBihau",
+      island == "Oahu" ~ "O\u02BBahu",
+      island == "Molokai" ~ "Moloka\u02BBi",
+      island == "Maui" ~ "Maui",
+      island == "Lanai" ~ "L\u0101na\u02BBi",
+      island == "Kahoolawe" ~ "Kaho\u02BBolawe",
+      island == "Hawaii" ~ "Hawai\u02BBi",
+      TRUE ~ island
+    ),
+    # Create county columns
+    county = case_when(
+      island == "Oahu" ~ "Honolulu",
+      island %in% c("Maui", "Molokai", "Lanai", "Kahoolawe") ~ "Maui",
+      island %in% c("Kauai", "Niihau") ~ "Kauai",
+      island == "Hawaii" ~ "Hawaii",
+      TRUE ~ NA_character_
+    ),
+    # For display
+    county_olelo = case_when(
+      county == "Kauai" ~ "Kaua\u02BBi",
+      county == "Hawaii" ~ "Hawai\u02BBi",
+      TRUE ~ county
+    )
+  ) |>
+  # Transform from wide to long format
+  pivot_longer(
+    cols = -c(year, island, island_olelo, county, county_olelo),
+    names_to = "ecosystem_type",
+    values_to = "exchange_value"
+  ) |>
+  mutate(
+    # Remove unnecessary partial string
+    ecosystem_type = str_remove(ecosystem_type, "^ev_total(_)?"),
+    # Standardize ecosystem type values
+    ecosystem_type = case_when(
+      ecosystem_type == "reef" ~ "Inshore — Reef",
+      ecosystem_type == "oo" ~ "Coastal — Open Ocean",
+      TRUE ~ "All Ecosystems"
+    ),
+    # Create new species group column (currently only herbivores)
+    species_group = "Herbivores",
+    # For display
+    exchange_value_formatted = scales::label_dollar(
+      accuracy = 1,
+      prefix = "$"
+    )(exchange_value)
+  ) |>
+  # Relocate columns
+  select(
+    year,
+    island,
+    island_olelo,
+    county,
+    county_olelo,
+    species_group,
+    ecosystem_type,
+    exchange_value,
+    exchange_value_formatted
+  )
+
+stopifnot(!any(grepl("[‘’]", noncomm_ev_df$island_olelo)))
+stopifnot(!any(grepl("[‘’]", noncomm_ev_df$county_olelo)))
+```
+
+### Process spatial data and create sf
+
+```{r}
+# Process marine mokus layer
+marine_mokus <- st_read(here(mokus_fp), quiet = TRUE) |>
+  # Filter to marine mokus
+  filter(realm == "Marine") |>
+  # Reproject to "EPSG:4326" for web mapping
+  st_transform("EPSG:4326") |>
+  # Use proper ʻokinas
+  mutate(
+    island_olelo = str_replace_all(island_olelo, "'|'|\u2018|\u2019", "\u02BB")
+  )
+
+# Create islands polygon
+islands <- marine_mokus |>
+  mutate(
+    # Standardize island values
+    island = str_to_title(island)
+  ) |>
+  ms_dissolve(
+    field = "island",
+    copy_fields = c("island", "island_olelo")
+  )
+
+# Create sf for choropleth map
+noncomm_ev_sf <- noncomm_ev_df |>
+  # Join islands layer to non-commercial ev data
+  left_join(islands, by = c("island", "island_olelo")) |>
+  # Convert to an sf object
+  st_as_sf() |>
+  # Rename geom to geometry to stay consistent with comm ev sf
+  rename(geometry = geom)
+
+# QA check
+stopifnot(!any(grepl("[‘’]", noncomm_ev_sf$island_olelo)))
+stopifnot(!any(grepl("[‘’]", noncomm_ev_sf$county_olelo)))
+stopifnot(sum(is.na(sf::st_dimension(noncomm_ev_sf$geometry))) == 0)
+```
+
+### Preview
+
+```{r}
+# Example df for choropleth map
+map_df <- noncomm_ev_sf |>
+  filter(
+    year == 2005,
+    county == "Maui"
+  )
+
+# Example choropleth map
+stopifnot(nrow(map_df) > 0)
+mapview(map_df, zcol = "exchange_value")
+```
+
+## Export
+
+Each dataset is exported in three formats:
+
+- **CSV**: Tabular data without geometry. Use for tables and line plots in the dashboard.
+- **GeoPackage (.gpkg)** and **GeoJSON (.geojson)**: Tabular data with reporting-unit geometries attached. Use either of these for the choropleth maps in the dashboard. GeoJSON is natively readable by most web mapping libraries. GeoPackage is a more compact binary format that some tools handle more efficiently.
+
+```{r}
+# Retrieve today's date
+today <- format(Sys.Date(), "%Y%m%d")
+
+# Define export directory
+processed_dir <- glue("data/03_processed/fisheries/{today}")
+
+# Create directories if they do not exist
+dir_create(here(glue("{processed_dir}/comm_ev")), recurse = TRUE)
+dir_create(here(glue("{processed_dir}/noncomm_ev")), recurse = TRUE)
+```
+
+### Commercial
+
+```{r}
+write_excel_csv(
+  comm_ev_df,
+  here(glue("{processed_dir}/comm_ev/{today}_tidied_comm_ev.csv"))
+)
+
+st_write(
+  comm_ev_sf,
+  here(glue("{processed_dir}/comm_ev/{today}_tidied_comm_ev.gpkg")),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+
+st_write(
+  comm_ev_sf,
+  here(glue("{processed_dir}/comm_ev/{today}_tidied_comm_ev.geojson")),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+```
+
+### Non-Commercial
+
+```{r}
+write_excel_csv(
+  noncomm_ev_df,
+  here(glue("{processed_dir}/noncomm_ev/{today}_tidied_noncomm_ev.csv"))
+)
+
+st_write(
+  noncomm_ev_sf,
+  here(glue("{processed_dir}/noncomm_ev/{today}_tidied_noncomm_ev.gpkg")),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+
+st_write(
+  noncomm_ev_sf,
+  here(glue("{processed_dir}/noncomm_ev/{today}_tidied_noncomm_ev.geojson")),
+  delete_dsn = TRUE,
+  quiet = TRUE
+)
+```
+
+## QA/QC
+
+Exhaustive verification that wide-to-long transformation preserved exchange values
+
+```{r}
+################
+# Commercial
+################
+
+# Recreate the raw wide-format df (same preprocessing steps before pivot)
+raw_comm <- read_excel(here(ev_fp), sheet = "Comm") |>
+  clean_names() |>
+  rename("area_id" = area) |>
+  select(-c("x19", "x20")) |>
+  mutate(
+    across(c(year, area_id), as.integer),
+    county = str_to_title(county),
+    # Must match the correction applied in the processing pipeline
+    county = if_else(county == "Oahu", "Honolulu", county)
+  ) |>
+  filter(area_id != 507)
+
+# Pivot raw to long using the same logic, but keep it minimal for comparison
+raw_comm_long <- raw_comm |>
+  pivot_longer(
+    cols = -c(year, area_id, county),
+    names_to = "col_name",
+    values_to = "raw_exchange_value"
+  ) |>
+  mutate(
+    col_name = str_remove(col_name, "^(ev_|eg_)")
+  ) |>
+  separate(
+    col = col_name,
+    into = c("species_group", "ecosystem_type"),
+    sep = "_",
+    remove = TRUE
+  ) |>
+  mutate(
+    species_group = case_when(
+      species_group == "deep7" ~ "Deep 7 Bottomfish",
+      species_group == "sbf" ~ "Shallow Bottomfish",
+      species_group == "reef" ~ "Reef-Associated",
+      species_group == "pelagic" ~ "Pelagics",
+      species_group == "total" ~ "All Species",
+      TRUE ~ NA_character_
+    ),
+    ecosystem_type = case_when(
+      ecosystem_type == "reef" ~ "Inshore — Reef",
+      ecosystem_type == "oo" ~ "Coastal — Open Ocean",
+      TRUE ~ "All Ecosystems"
+    )
+  )
+
+# Join and compare every single value
+comm_compare <- raw_comm_long |>
+  left_join(
+    comm_ev_df |>
+      select(
+        year,
+        area_id,
+        county,
+        species_group,
+        ecosystem_type,
+        exchange_value
+      ),
+    by = c("year", "area_id", "county", "species_group", "ecosystem_type")
+  ) |>
+  mutate(
+    match = case_when(
+      is.na(raw_exchange_value) & is.na(exchange_value) ~ TRUE,
+      # Allow sub-cent differences due to floating point handling
+      abs(raw_exchange_value - exchange_value) < 0.01 ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+# Row count check
+cat(glue(
+  "Commercial EV row count — raw long: {nrow(raw_comm_long)}, tidied long: {nrow(comm_ev_df)}\n"
+))
+stopifnot(nrow(raw_comm_long) == nrow(comm_ev_df))
+cat("\n✓ Row counts match\n\n")
+
+# Value check
+n_mismatches_comm <- sum(!comm_compare$match)
+cat(glue(
+  "Commercial EV value mismatches: {n_mismatches_comm} / {nrow(comm_compare)}\n"
+))
+
+if (n_mismatches_comm > 0) {
+  cat("\n⚠ Mismatched rows:\n")
+  comm_compare |> filter(!match) |> print(n = Inf)
+} else {
+  cat("\n✓ All commercial exchange values match\n\n")
+}
+
+stopifnot(n_mismatches_comm == 0)
+
+################
+# Non-Commercial
+################
+
+raw_noncomm <- read_excel(here(ev_fp), sheet = "Non-comm") |>
+  clean_names() |>
+  mutate(
+    year = as.integer(year),
+    island = str_to_title(island),
+    county = case_when(
+      island == "Oahu" ~ "Honolulu",
+      island %in% c("Maui", "Molokai", "Lanai", "Kahoolawe") ~ "Maui",
+      island %in% c("Kauai", "Niihau") ~ "Kauai",
+      island == "Hawaii" ~ "Hawaii",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Pivot raw to long using the same logic
+raw_noncomm_long <- raw_noncomm |>
+  pivot_longer(
+    cols = -c(year, island, county),
+    names_to = "ecosystem_type",
+    values_to = "raw_exchange_value"
+  ) |>
+  mutate(
+    ecosystem_type = str_remove(ecosystem_type, "^ev_total(_)?"),
+    ecosystem_type = case_when(
+      ecosystem_type == "reef" ~ "Inshore — Reef",
+      ecosystem_type == "oo" ~ "Coastal — Open Ocean",
+      TRUE ~ "All Ecosystems"
+    ),
+    species_group = "Herbivores"
+  )
+
+# Join and compare every single value
+noncomm_compare <- raw_noncomm_long |>
+  left_join(
+    noncomm_ev_df |>
+      select(
+        year,
+        island,
+        county,
+        species_group,
+        ecosystem_type,
+        exchange_value
+      ),
+    by = c("year", "island", "county", "species_group", "ecosystem_type")
+  ) |>
+  mutate(
+    match = case_when(
+      is.na(raw_exchange_value) & is.na(exchange_value) ~ TRUE,
+      # Allow sub-cent differences due to floating point handling
+      abs(raw_exchange_value - exchange_value) < 0.01 ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+# Row count check
+cat(glue(
+  "Non-commercial EV row count — raw long: {nrow(raw_noncomm_long)}, tidied long: {nrow(noncomm_ev_df)}\n"
+))
+stopifnot(nrow(raw_noncomm_long) == nrow(noncomm_ev_df))
+cat("\n✓ Row counts match\n\n")
+
+# Value check
+n_mismatches_nc <- sum(!noncomm_compare$match)
+cat(glue(
+  "Non-commercial EV value mismatches: {n_mismatches_nc} / {nrow(noncomm_compare)}\n"
+))
+
+if (n_mismatches_nc > 0) {
+  cat("\n⚠ Mismatched rows:\n")
+  noncomm_compare |> filter(!match) |> print(n = Inf)
+} else {
+  cat("\n✓ All non-commercial exchange values match\n\n")
+}
+
+stopifnot(n_mismatches_nc == 0)
+
+cat("\n✓ All QA checks passed — exchange values are intact\n")
+```
+
+## Session Info
+
+```{r}
+sessionInfo()
+```

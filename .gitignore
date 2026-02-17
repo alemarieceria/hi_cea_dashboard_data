@@ -1,0 +1,9 @@
+.claude/
+
+# Processed data outputs (too large for GitHub; regenerate via notebooks)
+data/03_processed/**/*.csv
+data/03_processed/**/*.gpkg
+data/03_processed/**/*.geojson
+
+# Archive folders
+_archive/
