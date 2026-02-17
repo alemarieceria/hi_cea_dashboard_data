@@ -33,7 +33,7 @@ Processed data is exported to `data/03_processed/` in date-stamped and account s
 
 | Dataset | Reporting unit | Temporal coverage | Formats |
 |---------|---------------|-------------------|---------|
-| Commercial fisheries EV | DAR catch areas (82) | 1997--2021 | CSV, GeoPackage, GeoJSON |
-| Non-commercial fisheries EV | Islands (6) | 2005--2022 | CSV, GeoPackage, GeoJSON |
+| Commercial fisheries EV | DAR catch areas (82) | 1997—2021 | CSV, GeoPackage, GeoJSON |
+| Non-commercial fisheries EV | Islands (6) | 2005—2022 | CSV, GeoPackage, GeoJSON |
 
 Some processed spatial files exceed GitHub's file size limits and are not included in the repository. To generate them locally, run the corresponding notebook after completing the setup steps above.
