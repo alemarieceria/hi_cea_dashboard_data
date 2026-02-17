@@ -6,7 +6,7 @@
 |--------|-------|
 | Description | Processed non-commercial fisheries exchange value (EV) data for the Main Hawaiian Islands (MHI) |
 | Reporting unit | Islands (6 islands: Hawai'i, Kaua'i, Lana'i, Maui, Moloka'i, O'ahu) |
-| Temporal coverage | 2005--2022 |
+| Temporal coverage | 2005—2022 |
 | Source data | MRIP Hawai'i Marine Recreational Fishing Survey |
 | Ecosystem attribution | Fish Species over Ecosystem Type (FSOET) dataset |
 | EV definition | Gross Revenue - Marginal Costs, per the UN SEEA-EA framework |
@@ -27,7 +27,7 @@ Ni'ihau and Kaho'olawe are not included because the MRIP survey does not cover t
 
 **Species groups:** Herbivores
 
-**Ecosystem types:** Inshore -- Reef, Coastal -- Open Ocean, All Ecosystems
+**Ecosystem types:** Inshore — Reef, Coastal — Open Ocean, All Ecosystems
 
 All herbivore species map to 100% reef habitat in this iteration.
 
